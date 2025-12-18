@@ -558,6 +558,7 @@ class PayrollEntry(Document):
 			accounting_key = (account, cost_center, employee)
 
 			account_dict[accounting_key] = account_dict.get(accounting_key, 0) + amount
+
 		return account_dict
 
 	def make_accrual_jv_entry(self, submitted_salary_slips):
