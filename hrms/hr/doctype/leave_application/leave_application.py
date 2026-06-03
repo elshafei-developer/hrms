@@ -187,18 +187,11 @@ class LeaveApplication(Document, PWANotificationsMixin):
 			leave_type = frappe.get_doc("Leave Type", self.leave_type)
 			if leave_type.applicable_after > 0:
 				date_of_joining = frappe.db.get_value("Employee", self.employee, "date_of_joining")
-				leave_days = get_approved_leaves_for_period(
-					self.employee, False, date_of_joining, self.from_date
-				)
 				number_of_days = date_diff(getdate(self.from_date), date_of_joining)
 				if number_of_days >= 0:
-					holidays = 0
-					if not frappe.db.get_value("Leave Type", self.leave_type, "include_holiday"):
-						holidays = get_holidays(self.employee, date_of_joining, self.from_date)
-					number_of_days = number_of_days - leave_days - holidays
 					if number_of_days < leave_type.applicable_after:
 						frappe.throw(
-							_("{0} applicable after {1} working days").format(
+							_("{0} applicable after {1} calendar days").format(
 								self.leave_type, leave_type.applicable_after
 							)
 						)
@@ -993,7 +986,7 @@ def get_number_of_leave_days(
 
 @frappe.whitelist()
 def get_leave_details(employee: str, date: str | datetime.date, for_salary_slip: bool = False) -> dict:
-	frappe.has_permission("Employee", "read", employee, throw=True)
+	validate_leave_access(employee)
 
 	allocation_records = get_leave_allocation_records(employee, date)
 	leave_allocation = {}
@@ -1054,8 +1047,7 @@ def get_leave_balance_on(
 	        if True, returns a dict eg: {'leave_balance': 10, 'leave_balance_for_consumption': 1}
 	        else, returns leave_balance (in this case 10)
 	"""
-	if frappe.request:
-		frappe.has_permission("Employee", "read", employee, throw=True)
+	validate_leave_access(employee)
 
 	if not to_date:
 		to_date = nowdate()
@@ -1559,3 +1551,13 @@ def get_leave_approver_and_mandatory(employee: str) -> dict:
 		"is_mandatory": 1 if mandatory else 0,
 		"leave_approver": get_leave_approver(employee),
 	}
+
+
+def validate_leave_access(employee):
+	employee_user = frappe.db.get_value("Employee", employee, "user_id")
+	leave_approver = get_leave_approver(employee)
+
+	if frappe.session.user not in (employee_user, leave_approver) and (
+		not frappe.has_permission("Employee", "read", employee)
+	):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
