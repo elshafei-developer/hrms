@@ -3,6 +3,7 @@
 
 
 import frappe
+from frappe.permissions import add_user_permission
 from frappe.utils import add_days, add_months, flt, get_year_ending, get_year_start, getdate
 
 from erpnext.setup.doctype.employee.test_employee import make_employee
@@ -14,7 +15,7 @@ from hrms.hr.doctype.leave_ledger_entry.leave_ledger_entry import (
 	process_expired_allocation,
 )
 from hrms.hr.doctype.leave_type.test_leave_type import create_leave_type
-from hrms.hr.report.employee_leave_balance.employee_leave_balance import execute
+from hrms.hr.report.employee_leave_balance.employee_leave_balance import execute, get_employees
 from hrms.payroll.doctype.salary_slip.test_salary_slip import (
 	make_holiday_list,
 	make_leave_application,
@@ -205,6 +206,58 @@ class TestEmployeeLeaveBalance(HRMSTestSuite):
 		)
 		self.assertEqual(report[1][0].opening_balance, opening_balance)
 
+	def test_carry_forwarded_leaves_are_included_when_they_expire(self):
+		leave_type = create_leave_type(
+			leave_type_name="_Test_CF_report_expiry",
+			is_carry_forward=1,
+			expire_carry_forwarded_leaves_after_days=7,
+		)
+
+		previous_allocation = make_allocation_record(
+			employee=self.employee_id,
+			from_date=add_days(self.date, -45),
+			to_date=add_days(self.date, -31),
+			leave_type=leave_type.name,
+			leaves=7,
+		)
+		current_allocation = make_allocation_record(
+			employee=self.employee_id,
+			from_date=add_days(self.date, -20),
+			to_date=add_days(self.date, 30),
+			carry_forward=True,
+			leave_type=leave_type.name,
+			leaves=11,
+		)
+
+		leave_application = make_leave_application(
+			self.employee_id,
+			add_days(current_allocation.from_date, 8),
+			add_days(current_allocation.from_date, 16),
+			leave_type.name,
+		)
+		leave_application.reload()
+		process_expired_allocation()
+
+		filters = frappe._dict(
+			{
+				"from_date": current_allocation.from_date,
+				"to_date": current_allocation.to_date,
+				"employee": self.employee_id,
+			}
+		)
+		report = execute(filters)
+		row = next(row for row in report[1] if row.leave_type == leave_type.name)
+
+		expected_allocated = current_allocation.new_leaves_allocated + current_allocation.unused_leaves
+		expected_closing = row.opening_balance + row.leaves_allocated - row.leaves_expired - row.leaves_taken
+
+		self.assertEqual(current_allocation.unused_leaves, previous_allocation.new_leaves_allocated)
+		self.assertEqual(row.opening_balance, 0)
+		self.assertEqual(row.leaves_allocated, flt(expected_allocated))
+		self.assertEqual(row.leaves_expired, flt(current_allocation.unused_leaves))
+		self.assertEqual(row.leaves_taken, flt(leave_application.total_leave_days))
+		self.assertEqual(row.closing_balance, flt(expected_closing))
+
 	@assign_holiday_list("_Test Emp Balance Holiday List", "_Test Company")
 	def test_employee_status_filter(self):
 		frappe.get_doc(test_records[0]).insert()
@@ -241,6 +294,16 @@ class TestEmployeeLeaveBalance(HRMSTestSuite):
 		)
 		report = execute(filters)
 		self.assertEqual(len(report[1]), 1)
+
+	def test_employee_permission_filter(self):
+		make_employee("test_emp_leave_balance_other@example.com", company="_Test Company")
+		add_user_permission("Employee", self.employee_id, "test_emp_leave_balance@example.com")
+
+		filters = frappe._dict({"from_date": self.year_start, "to_date": self.year_end})
+		with self.set_user("test_emp_leave_balance@example.com"):
+			employees = {emp.name for emp in get_employees(filters)}
+
+		self.assertEqual(employees, {self.employee_id})
 
 	def test_manually_expired_leaves(self):
 		leave_type = create_leave_type(leave_type_name="Compensatory off")

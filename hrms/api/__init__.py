@@ -78,6 +78,17 @@ def get_all_employees() -> list[dict]:
 	)
 
 
+@frappe.whitelist()
+def get_reports_to_employee_name(employee: str) -> str:
+	reports_to = frappe.db.get_value(
+		"Employee", {"user_id": frappe.session.user, "status": "Active"}, "reports_to"
+	)
+	if not reports_to or reports_to != employee:
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+
+	return frappe.db.get_value("Employee", employee, "employee_name") or ""
+
+
 def get_current_employee() -> str:
 	employee = get_current_employee_info().get("name")
 	if not employee:
@@ -93,6 +104,7 @@ def get_hr_settings() -> dict:
 		allow_employee_checkin_from_mobile_app=settings.allow_employee_checkin_from_mobile_app,
 		allow_geolocation_tracking=settings.allow_geolocation_tracking,
 		prevent_self_leave_approval=settings.prevent_self_leave_approval,
+		enable_multi_currency_expense_claim=settings.enable_multi_currency_expense_claim,
 	)
 
 
@@ -105,7 +117,7 @@ def get_unread_notifications_count() -> int:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def mark_all_notifications_as_read() -> None:
 	frappe.db.set_value(
 		"PWA Notification",
@@ -660,7 +672,7 @@ def get_employee_advance_balance() -> list[dict]:
 			& (Advance.paid_amount)
 			& (Advance.employee == employee)
 			# don't need claimed & returned advances, only partly or completely paid ones
-			& (Advance.status.isin(["Paid", "Unpaid"]))
+			& (Advance.status.isin(["Paid", "Partially Paid", "Unpaid"]))
 		)
 		.orderby(Advance.posting_date, order=Order.desc)
 	).run(as_dict=True)
@@ -701,8 +713,12 @@ def get_currency_symbols() -> dict:
 
 @frappe.whitelist()
 def get_company_cost_center_and_expense_account(company: str) -> dict:
+	frappe.has_permission("Company", "read", company, throw=True)
 	return frappe.db.get_value(
-		"Company", company, ["cost_center", "default_expense_claim_payable_account"], as_dict=True
+		"Company",
+		company,
+		["cost_center", "default_expense_claim_payable_account", "default_payroll_payable_account"],
+		as_dict=True,
 	)
 
 
@@ -726,6 +742,7 @@ def get_doctype_states(doctype: str) -> dict:
 # File
 @frappe.whitelist()
 def get_attachments(dt: str, dn: str):
+	frappe.has_permission(dt, "read", dn, throw=True)
 	return frappe.get_list(
 		"File",
 		fields=["name", "file_name", "file_url", "is_private"],
@@ -733,7 +750,7 @@ def get_attachments(dt: str, dn: str):
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def upload_base64_file(
 	content: str, filename: str, dt: str | None = None, dn: str | None = None, fieldname: str | None = None
 ):
@@ -777,8 +794,13 @@ def upload_base64_file(
 	).insert()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def delete_attachment(filename: str):
+	attached_to_doctype, attached_to_name = frappe.db.get_value(
+		"File", filename, ["attached_to_doctype", "attached_to_name"]
+	)
+	if attached_to_doctype and attached_to_name:
+		frappe.has_permission(attached_to_doctype, "write", attached_to_name, throw=True)
 	frappe.delete_doc("File", filename)
 
 

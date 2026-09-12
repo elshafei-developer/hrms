@@ -55,7 +55,7 @@ class PayrollEntry(Document):
 		designation: DF.Link | None
 		employees: DF.Table[PayrollEmployeeDetail]
 		end_date: DF.Date
-		error_message: DF.SmallText | None
+		error_message: DF.TextEditor | None
 		exchange_rate: DF.Float
 		grade: DF.Link | None
 		number_of_employees: DF.Int
@@ -88,7 +88,7 @@ class PayrollEntry(Document):
 			return
 
 		# check if salary slips were manually submitted
-		entries = frappe.db.count("Salary Slip", {"payroll_entry": self.name, "docstatus": 1}, ["name"])
+		entries = frappe.db.count("Salary Slip", {"payroll_entry": self.name, "docstatus": 1})
 		if cint(entries) == len(self.employees):
 			self.set_onload("submitted_ss", True)
 
@@ -300,7 +300,7 @@ class PayrollEntry(Document):
 			if employee.employee in withheld_salaries:
 				employee.is_salary_withheld = 1
 
-	@frappe.whitelist()
+	@frappe.whitelist(methods=["POST"])
 	def create_salary_slips(self) -> None:
 		"""
 		Creates salary slip for selected employees if already not created
@@ -363,7 +363,7 @@ class PayrollEntry(Document):
 
 		return ss_list
 
-	@frappe.whitelist()
+	@frappe.whitelist(methods=["POST"])
 	def submit_salary_slips(self) -> None:
 		self.check_permission("write")
 		salary_slips = self.get_sal_slip_list(ss_status=0)
@@ -962,7 +962,7 @@ class PayrollEntry(Document):
 			),
 		}
 
-	@frappe.whitelist()
+	@frappe.whitelist(methods=["POST"])
 	def make_bank_entry(self, for_withheld_salaries: bool = False) -> Document | None:
 		self.check_permission("write")
 		self.employee_based_payroll_payable_entries = {}
@@ -1273,8 +1273,10 @@ class PayrollEntry(Document):
 
 		return self._holidays_between_dates.get(key) or 0
 
-	@frappe.whitelist()
+	@frappe.whitelist(methods=["POST"])
 	def create_overtime_slips(self) -> None:
+		self.check_permission("write")
+
 		from hrms.hr.doctype.overtime_slip.overtime_slip import (
 			create_overtime_slips_for_employees,
 			filter_employees_for_overtime_slip_creation,
@@ -1310,8 +1312,10 @@ class PayrollEntry(Document):
 			else:
 				create_overtime_slips_for_employees(employees, args)
 
-	@frappe.whitelist()
+	@frappe.whitelist(methods=["POST"])
 	def submit_overtime_slips(self) -> None:
+		self.check_permission("write")
+
 		from hrms.hr.doctype.overtime_slip.overtime_slip import (
 			submit_overtime_slips_for_employees,
 		)
@@ -1467,16 +1471,30 @@ def set_filter_conditions(query, filters, qb_object):
 
 def set_match_conditions(query, qb_object):
 	match_conditions = get_match_cond("Employee", as_condition=False)
+	employee_permission_fields = get_employee_permission_fields()
 
 	for cond in match_conditions:
 		if isinstance(cond, dict):
 			for key, value in cond.items():
+				fieldname = employee_permission_fields.get(key)
+				if not fieldname:
+					continue
+
 				if isinstance(value, list):
-					query = query.where(qb_object[key].isin(value))
+					query = query.where(qb_object[fieldname].isin(value))
 				else:
-					query = query.where(qb_object[key] == value)
+					query = query.where(qb_object[fieldname] == value)
 
 	return query
+
+
+def get_employee_permission_fields():
+	permission_fields = {"Employee": "name"}
+	for df in frappe.get_meta("Employee").get_link_fields():
+		if not df.get("ignore_user_permissions"):
+			permission_fields[df.options] = df.fieldname
+
+	return permission_fields
 
 
 def remove_payrolled_employees(emp_list, start_date, end_date):
@@ -1611,8 +1629,23 @@ def create_salary_slips_for_employees(employees, args, publish_progress=True):
 
 		employees = list(set(employees) - set(salary_slips_exist_for))
 		for emp in employees:
-			args.update({"doctype": "Salary Slip", "employee": emp})
-			frappe.get_doc(args).insert()
+			slip_args = {
+				"doctype": "Salary Slip",
+				"employee": emp,
+				"salary_slip_based_on_timesheet": args.get("salary_slip_based_on_timesheet"),
+				"payroll_frequency": args.get("payroll_frequency"),
+				"start_date": args.get("start_date"),
+				"end_date": args.get("end_date"),
+				"company": args.get("company"),
+				"posting_date": args.get("posting_date"),
+				"deduct_tax_for_unsubmitted_tax_exemption_proof": args.get(
+					"deduct_tax_for_unsubmitted_tax_exemption_proof"
+				),
+				"payroll_entry": args.get("payroll_entry"),
+				"exchange_rate": args.get("exchange_rate"),
+				"currency": args.get("currency"),
+			}
+			frappe.get_doc(slip_args).insert()
 
 			count += 1
 			if publish_progress:
@@ -1735,17 +1768,25 @@ def submit_salary_slips_for_employees(payroll_entry, salary_slips, publish_progr
 def get_payroll_entries_for_jv(
 	doctype: str, txt: str, searchfield: str, start: int, page_len: int, filters: dict
 ) -> list:
-	# nosemgrep: frappe-semgrep-rules.rules.frappe-using-db-sql
-	return frappe.db.sql(
-		f"""
-		select name from `tabPayroll Entry`
-		where `{searchfield}` LIKE %(txt)s
-		and name not in
-			(select reference_name from `tabJournal Entry Account`
-				where reference_type="Payroll Entry")
-		order by name limit %(start)s, %(page_len)s""",
-		{"txt": "%%%s%%" % txt, "start": start, "page_len": page_len},
+	PayrollEntry = frappe.qb.DocType("Payroll Entry")
+	JournalEntryAccount = frappe.qb.DocType("Journal Entry Account")
+
+	linked_entries = (
+		frappe.qb.from_(JournalEntryAccount)
+		.select(JournalEntryAccount.reference_name)
+		.where(JournalEntryAccount.reference_type == "Payroll Entry")
 	)
+
+	return (
+		frappe.qb.from_(PayrollEntry)
+		.select(PayrollEntry.name)
+		.where(PayrollEntry.docstatus == 1)
+		.where(PayrollEntry[searchfield].like("%%%s%%" % txt))
+		.where(PayrollEntry.name.notin(linked_entries))
+		.orderby(PayrollEntry.name)
+		.limit(page_len)
+		.offset(start)
+	).run()
 
 
 def get_employee_list(

@@ -241,9 +241,12 @@ class Attendance(Document):
 			self.leave_application = None
 
 	def validate_employee(self):
-		emp = frappe.db.sql(
-			"select name from `tabEmployee` where name = %s and status = 'Active'", self.employee
-		)
+		Employee = frappe.qb.DocType("Employee")
+		emp = (
+			frappe.qb.from_(Employee)
+			.select(Employee.name)
+			.where((Employee.name == self.employee) & (Employee.status == "Active"))
+		).run()
 		if not emp:
 			frappe.throw(_("Employee {0} is not active or does not exist").format(self.employee))
 
@@ -286,7 +289,12 @@ class Attendance(Document):
 
 
 @frappe.whitelist()
-def get_events(start: date | str, end: date | str, filters: str | list | None = None) -> list[dict]:
+def get_events(
+	start: date | str,
+	end: date | str,
+	filters: str | list | None = None,
+	order_by: str | None = None,
+) -> list[dict]:
 	employee = frappe.db.get_value("Employee", {"user_id": frappe.session.user})
 	if not employee:
 		return []
@@ -298,12 +306,12 @@ def get_events(start: date | str, end: date | str, filters: str | list | None = 
 	if not filters:
 		filters = []
 	filters.append(["attendance_date", "between", [get_datetime(start).date(), get_datetime(end).date()]])
-	attendance_records = add_attendance(filters)
+	attendance_records = add_attendance(filters, order_by)
 	add_holidays(attendance_records, start, end, employee)
 	return attendance_records
 
 
-def add_attendance(filters):
+def add_attendance(filters, order_by=None):
 	attendance = frappe.get_list(
 		"Attendance",
 		fields=[
@@ -315,6 +323,7 @@ def add_attendance(filters):
 			"docstatus",
 		],
 		filters=filters,
+		order_by=order_by,
 	)
 	for record in attendance:
 		record["title"] = f"{record['employee_name']} : {record['status']}"
@@ -375,7 +384,7 @@ def mark_attendance(
 	return attendance.name
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def mark_bulk_attendance(data: str | dict):
 	import json
 
@@ -432,6 +441,7 @@ def process_bulk_attendance_in_batches(data, chunk_size=20):
 def get_unmarked_days(
 	employee: str, from_date: str | date, to_date: str | date, exclude_holidays: str | int = 0
 ) -> list:
+	frappe.has_permission("Employee", "read", employee, throw=True)
 	joining_date, relieving_date = frappe.get_cached_value(
 		"Employee", employee, ["date_of_joining", "relieving_date"]
 	)

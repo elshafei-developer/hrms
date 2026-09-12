@@ -30,6 +30,7 @@ frappe.ui.form.on("Leave Allocation", {
 
 	refresh: function (frm) {
 		hrms.leave_utils.add_view_ledger_button(frm);
+		hrms.leave_utils.add_leave_balance_button(frm);
 
 		if (frm.doc.docstatus === 1 && !frm.doc.expired) {
 			var valid_expiry = moment(frappe.datetime.get_today()).isBetween(
@@ -203,12 +204,14 @@ frappe.ui.form.on("Leave Allocation", {
 			frm.doc.name,
 		);
 		df.formatter = function (value, df, options, row) {
+			const formatted_date = frappe.form.formatters.Date(value, df, options, row);
+
 			if (row.attempted && row.failed) {
-				return `<span class="indicator red">${value}</span>`;
+				return `<span class="indicator red">${formatted_date}</span>`;
 			} else if (row.attempted && row.is_allocated) {
-				return `<span class="indicator green">${value}</span>`;
+				return `<span class="indicator green">${formatted_date}</span>`;
 			} else {
-				return value;
+				return formatted_date;
 			}
 		};
 		frm.refresh_field("earned_leave_schedule");
